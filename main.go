@@ -4,9 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"time"
 
-	"f1-tui/internal/source"
 	"f1-tui/internal/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -48,29 +46,19 @@ func main() {
 
 	flag.Parse()
 
-	// 2. Select and initialize the data source
-	var src source.Source
-
-	if *liveMode {
-		fmt.Printf("🏎️  Initializing Live Polling Mode for Session %d...\n", *sessionKey)
-		src = source.NewLiveSource(*token, *sessionKey)
-	} else {
-		maxSleep := time.Duration(*maxSleepSec * float64(time.Second))
-		fmt.Printf("🎬 Initializing Replay Mode for Session %d (Speed: %.1fx, Max Delay: %v)...\n", *sessionKey, *speedMultiplier, maxSleep)
-		src = source.NewReplaySource(*sessionKey, *speedMultiplier, maxSleep)
+	// 2. Initialize Bubble Tea Program
+	cfg := tui.Config{
+		SessionKey: *sessionKey,
+		Speed:      *speedMultiplier,
+		MaxSleep:   *maxSleepSec,
+		Live:       *liveMode,
+		Token:      *token,
 	}
 
-	// 3. Initialize Bubble Tea Program
-	model := tui.NewModel(src)
+	model := tui.NewModel(cfg)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
-	// Start active goroutine to pipe raw channel updates to program
-	go func() {
-		// Wait a small buffer for bubbletea to start
-		time.Sleep(300 * time.Millisecond)
-	}()
-
-	// 4. Run the program
+	// 3. Run the program
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("❌ Critical TUI crash: %v\n", err)
 		os.Exit(1)

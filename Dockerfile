@@ -1,5 +1,5 @@
 # Stage 1: Build the Go binary
-FROM golang:1.22-bookworm AS builder
+FROM golang:latest AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -10,11 +10,19 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o f1-tui main.go
 FROM debian:bookworm-slim
 WORKDIR /app
 
-# Install ttyd and CA certificates (necessary for secure HTTPS requests to api.openf1.org)
+# Install curl and CA certificates (necessary for secure HTTPS requests to api.openf1.org)
 RUN apt-get update && apt-get install -y \
-    ttyd \
+    curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Dynamically download the pre-compiled ttyd standalone binary based on CPU architecture (Intel vs ARM64)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then TTYD_ARCH="x86_64"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then TTYD_ARCH="aarch64"; \
+    else TTYD_ARCH="x86_64"; fi && \
+    curl -L -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${TTYD_ARCH}" && \
+    chmod +x /usr/local/bin/ttyd
 
 # Copy the compiled binary from the builder stage
 COPY --from=builder /app/f1-tui .

@@ -2,11 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"f1-tui/internal/source"
 	"f1-tui/internal/state"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -18,7 +21,31 @@ type LoadingFinishedMsg struct {
 	Drivers map[int]source.Driver
 }
 
+type appState int
+
+const (
+	StateHub appState = iota
+	StateLoading
+	StateDashboard
+)
+
+type Config struct {
+	SessionKey int
+	Speed      float64
+	MaxSleep   float64
+	Live       bool
+	Token      string
+}
+
 type Model struct {
+	config       Config
+	appState     appState
+	hubCursor    int
+	inputMode    bool
+	focusSpeed   bool
+	textInput    textinput.Model
+	speedInput   textinput.Model
+
 	source       source.Source
 	state        *state.SessionState
 	width        int
@@ -31,9 +58,36 @@ type Model struct {
 	scrollOffset int
 }
 
-func NewModel(src source.Source) *Model {
+var curatedSessions = []struct {
+	Name string
+	Key  int
+}{
+	{"Live Timing (Current Session)", 0},
+	{"2026 Japan GP (Suzuka)", 11253},
+	{"2024 Belgian GP (Spa)", 9574},
+	{"2024 British GP (Silverstone)", 9558},
+	{"2024 Brazilian GP (Interlagos)", 9636},
+	{"2024 Italian GP (Monza)", 9590},
+	{"2024 Monaco GP", 9523},
+	{"Custom Session Key", -1},
+}
+
+func NewModel(cfg Config) *Model {
+	ti := textinput.New()
+	ti.Placeholder = "Enter session key (e.g. 9159)"
+	ti.CharLimit = 10
+	ti.Width = 30
+
+	si := textinput.New()
+	si.Placeholder = "Enter speed (e.g. 12.5)"
+	si.CharLimit = 10
+	si.Width = 25
+
 	return &Model{
-		source:     src,
+		config:     cfg,
+		appState:   StateHub,
+		textInput:  ti,
+		speedInput: si,
 		state:      state.NewSessionState(),
 		loading:    true,
 		loadingMsg: "Connecting to OpenF1 API and fetching session details...",
@@ -41,8 +95,18 @@ func NewModel(src source.Source) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	// Initialize metadata fetching concurrently
+	return textinput.Blink
+}
+
+func (m *Model) startSession() tea.Cmd {
 	return func() tea.Msg {
+		if m.config.Live {
+			m.source = source.NewLiveSource(m.config.Token, m.config.SessionKey)
+		} else {
+			maxSleep := time.Duration(m.config.MaxSleep * float64(time.Second))
+			m.source = source.NewReplaySource(m.config.SessionKey, m.config.Speed, maxSleep)
+		}
+
 		session, err := m.source.GetSession()
 		if err != nil {
 			return ErrorMsg(err)
@@ -59,19 +123,119 @@ func (m *Model) Init() tea.Cmd {
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "ctrl+c":
-			m.source.Stop()
-			return m, tea.Quit
-		case "up":
-			if m.scrollOffset > 0 {
-				m.scrollOffset--
+		case "ctrl+c":
+			if m.source != nil {
+				m.source.Stop()
 			}
-		case "down":
-			if m.scrollOffset < len(m.state.RaceMessages) {
-				m.scrollOffset++
+			return m, tea.Quit
+		}
+
+		if m.appState == StateHub {
+			if m.inputMode {
+				switch msg.String() {
+				case "enter":
+					key, err := strconv.Atoi(m.textInput.Value())
+					if err == nil {
+						m.config.SessionKey = key
+						m.config.Live = false
+						m.appState = StateLoading
+						return m, m.startSession()
+					}
+				case "esc":
+					m.inputMode = false
+					m.textInput.Blur()
+				default:
+					m.textInput, cmd = m.textInput.Update(msg)
+					return m, cmd
+				}
+			} else if m.focusSpeed {
+				switch msg.String() {
+				case "enter":
+					val, err := strconv.ParseFloat(m.speedInput.Value(), 64)
+					if err == nil && val > 0 {
+						m.config.Speed = val
+					}
+					m.focusSpeed = false
+					m.speedInput.Blur()
+				case "esc":
+					m.focusSpeed = false
+					m.speedInput.Blur()
+				default:
+					m.speedInput, cmd = m.speedInput.Update(msg)
+					return m, cmd
+				}
+			} else {
+				switch msg.String() {
+				case "q":
+					return m, tea.Quit
+				case "s":
+					m.focusSpeed = true
+					m.speedInput.Focus()
+					m.speedInput.SetValue(fmt.Sprintf("%v", m.config.Speed))
+					return m, textinput.Blink
+				case "up", "k":
+					if m.hubCursor > 0 {
+						m.hubCursor--
+					}
+				case "down", "j":
+					if m.hubCursor < len(curatedSessions)-1 {
+						m.hubCursor++
+					}
+				case "left", "h":
+					if m.config.Speed > 10 {
+						m.config.Speed -= 5
+					} else if m.config.Speed > 1 {
+						m.config.Speed -= 1
+					} else if m.config.Speed > 0.1 {
+						m.config.Speed -= 0.1
+					}
+				case "right", "l":
+					if m.config.Speed >= 10 {
+						m.config.Speed += 5
+					} else if m.config.Speed >= 1 {
+						m.config.Speed += 1
+					} else {
+						m.config.Speed += 0.1
+					}
+				case "enter":
+					selected := curatedSessions[m.hubCursor]
+					if selected.Key == -1 {
+						m.inputMode = true
+						m.textInput.Focus()
+						return m, textinput.Blink
+					} else if selected.Key == 0 {
+						m.config.Live = true
+						m.appState = StateLoading
+						return m, m.startSession()
+					} else {
+						m.config.SessionKey = selected.Key
+						m.config.Live = false
+						m.appState = StateLoading
+						return m, m.startSession()
+					}
+				}
+			}
+			return m, nil
+		} else if m.appState == StateDashboard {
+			switch msg.String() {
+			case "q":
+				if m.source != nil {
+					m.source.Stop()
+				}
+				return m, tea.Quit
+			case "up":
+				if m.scrollOffset > 0 {
+					m.scrollOffset--
+				}
+			case "down":
+				if m.scrollOffset < len(m.state.RaceMessages) {
+					m.scrollOffset++
+				}
 			}
 		}
 
@@ -81,6 +245,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case LoadingFinishedMsg:
 		m.loading = false
+		m.appState = StateDashboard
 		m.state.SetSession(msg.Session)
 		m.state.SetDrivers(msg.Drivers)
 
@@ -167,7 +332,11 @@ func (m *Model) View() string {
 			Render(fmt.Sprintf("❌ Error: %v\n\nPress 'q' to quit.", m.err))
 	}
 
-	if m.loading {
+	if m.appState == StateHub {
+		return m.renderHub()
+	}
+
+	if m.appState == StateLoading {
 		return lipgloss.Place(
 			m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
@@ -177,6 +346,7 @@ func (m *Model) View() string {
 				Render("🏎️  F1 TUI Leaderboard Loading\n\n"+m.loadingMsg),
 		)
 	}
+
 
 	// 1. Build Header
 	header := m.renderHeader()
@@ -467,4 +637,50 @@ func (m *Model) renderRaceControl(width, height int) string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, list...)
+}
+
+func (m *Model) renderHub() string {
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("202")).Bold(true).MarginBottom(1)
+	title := titleStyle.Render("🏎️  FORMULA 1 TIMING TOWER - SESSION HUB")
+
+	var s strings.Builder
+	s.WriteString(title + "\n\n")
+
+	for i, session := range curatedSessions {
+		cursor := "  "
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("251"))
+		if m.hubCursor == i {
+			cursor = "> "
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+		}
+
+		s.WriteString(cursor + style.Render(session.Name) + "\n")
+
+		if session.Key == -1 && m.inputMode {
+			s.WriteString("    " + m.textInput.View() + "\n")
+		}
+	}
+
+	s.WriteString("\n")
+	s.WriteString(lipgloss.NewStyle().Foreground(colorGridBorder).Render(strings.Repeat("─", 40)) + "\n")
+
+	speedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
+	if m.focusSpeed {
+		s.WriteString(speedStyle.Render("Replay Speed: ") + m.speedInput.View() + "\n\n")
+	} else {
+		s.WriteString(speedStyle.Render(fmt.Sprintf("Replay Speed: < %.1fx >  (Left/Right to toggle, 's' to type)", m.config.Speed)) + "\n\n")
+	}
+
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	s.WriteString(helpStyle.Render("↑/↓: Select  •  Enter: Confirm  •  q: Quit"))
+
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorGridBorder).
+			Padding(1, 4).
+			Render(s.String()),
+	)
 }
