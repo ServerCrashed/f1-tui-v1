@@ -186,16 +186,45 @@ func (r *ReplaySource) Stop() {
 	close(r.stopChan)
 }
 
-// Fetch helpers with basic handling
+// Fetch helpers with retry logic
+func (r *ReplaySource) fetchAPI(url string) ([]byte, error) {
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		resp, err := http.Get(url)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Second * time.Duration(i+1))
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Second * time.Duration(i+1))
+			continue
+		}
+
+		if resp.StatusCode == 200 {
+			// If it's a JSON object instead of an array (often indicating an API error string), treat it as an error to trigger a retry
+			if len(body) > 0 && body[0] == '{' {
+				lastErr = fmt.Errorf("API returned object instead of array (rate limit?): %s", string(body))
+				time.Sleep(time.Second * time.Duration(i+1))
+				continue
+			}
+			return body, nil
+		}
+
+		lastErr = fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		time.Sleep(time.Second * time.Duration(i+1))
+	}
+	return nil, fmt.Errorf("failed after retries: %v", lastErr)
+}
+
 func (r *ReplaySource) fetchLaps() ([]Lap, error) {
 	url := fmt.Sprintf("https://api.openf1.org/v1/laps?session_key=%d", r.SessionKey)
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := r.fetchAPI(url)
 	if err != nil {
 		return nil, err
 	}
@@ -209,13 +238,7 @@ func (r *ReplaySource) fetchLaps() ([]Lap, error) {
 
 func (r *ReplaySource) fetchPositions() ([]Position, error) {
 	url := fmt.Sprintf("https://api.openf1.org/v1/position?session_key=%d", r.SessionKey)
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := r.fetchAPI(url)
 	if err != nil {
 		return nil, err
 	}
@@ -229,13 +252,7 @@ func (r *ReplaySource) fetchPositions() ([]Position, error) {
 
 func (r *ReplaySource) fetchRaceControl() ([]RaceControl, error) {
 	url := fmt.Sprintf("https://api.openf1.org/v1/race_control?session_key=%d", r.SessionKey)
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := r.fetchAPI(url)
 	if err != nil {
 		return nil, err
 	}
@@ -249,13 +266,7 @@ func (r *ReplaySource) fetchRaceControl() ([]RaceControl, error) {
 
 func (r *ReplaySource) fetchWeather() ([]Weather, error) {
 	url := fmt.Sprintf("https://api.openf1.org/v1/weather?session_key=%d", r.SessionKey)
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := r.fetchAPI(url)
 	if err != nil {
 		return nil, err
 	}
